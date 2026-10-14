@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -13,22 +14,27 @@
       text-align: center;
       padding: 16px;
       background: #f5f7fa;
+      color: #222;
     }
 
-    h1 { font-size: 26px; }
+    h1 { font-size: 25px; }
+    h2 { font-size: 20px; margin-top: 28px; }
 
-    #status {
+    button, input {
+      font-size: 16px;
+      padding: 12px;
+      margin: 6px;
+      border-radius: 10px;
+    }
+
+    button { cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    #status, #result {
       font-size: 18px;
       font-weight: bold;
       white-space: pre-line;
-    }
-
-    button {
-      font-size: 18px;
-      padding: 12px 20px;
-      margin: 8px;
-      border-radius: 10px;
-      cursor: pointer;
+      line-height: 1.6;
     }
 
     #cameraArea {
@@ -40,6 +46,7 @@
     }
 
     video, canvas {
+      display: block;
       width: 100%;
       height: auto;
       border-radius: 12px;
@@ -51,11 +58,33 @@
       left: 0;
     }
 
-    #result {
-      font-size: 20px;
-      font-weight: bold;
+    .panel {
+      max-width: 640px;
+      margin: 16px auto;
+      padding: 16px;
+      background: white;
+      border-radius: 12px;
+      text-align: center;
+    }
+
+    #photoInput {
+      display: block;
+      width: 90%;
+      max-width: 400px;
+      margin: 12px auto;
+    }
+
+    #registeredList {
+      text-align: left;
       white-space: pre-line;
-      line-height: 1.5;
+      overflow-wrap: anywhere;
+      line-height: 1.7;
+    }
+
+    .note {
+      font-size: 13px;
+      color: #555;
+      line-height: 1.6;
     }
   </style>
 </head>
@@ -63,178 +92,416 @@
 <body>
   <h1>顔認証テスト</h1>
 
-  <p id="status">カメラを起動してください</p>
+  <p id="status">最初に顔認識モデルを読み込みます。</p>
 
-  <button id="startButton" onclick="startCamera()">
-    カメラを起動
-  </button>
+  <section class="panel">
+    <h2>① 社員の顔写真を一括登録</h2>
 
-  <button id="stopButton" onclick="stopCamera()" disabled>
-    カメラを停止
-  </button>
+    <p>
+      社員名がファイル名に入った写真を選択してください。<br>
+      例：山田太郎.jpg
+    </p>
 
-  <div id="cameraArea">
-    <video id="video" autoplay muted playsinline></video>
-    <canvas id="overlay"></canvas>
-  </div>
+    <input
+      id="photoInput"
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      multiple
+    >
 
-  <p id="result">このテストでは顔の検出のみを行います。</p>
+    <button id="registerButton" onclick="registerPhotos()" disabled>
+      選択した写真を一括登録
+    </button>
 
-  <script>
-    const MODEL_URL =
-      "https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights";
+    <p id="photoStatus">モデル読み込み待ち</p>
+    <p id="registeredList">登録人数：0人</p>
 
-    const video = document.getElementById("video");
-    const canvas = document.getElementById("overlay");
-    const statusText = document.getElementById("status");
-    const resultText = document.getElementById("result");
-    const startButton = document.getElementById("startButton");
-    const stopButton = document.getElementById("stopButton");
+    <button onclick="clearRegisteredFaces()">
+      登録データをすべて消去
+    </button>
+  </section>
 
-    let stream = null;
-    let running = false;
-    let busy = false;
-    let modelsLoaded = false;
-    let lastFaceCount = -1;
+  <section class="panel">
+    <h2>② カメラで顔を照合</h2>
 
-    async function startCamera() {
-      if (running) return;
+    <button id="startButton" onclick="startCamera()" disabled>
+      カメラを起動
+    </button>
 
-      startButton.disabled = true;
-      statusText.textContent = "顔認識モデルを準備しています…";
+    <button id="stopButton" onclick="stopCamera()" disabled>
+      カメラを停止
+    </button>
 
-      try {
-        if (!modelsLoaded) {
-          await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-          modelsLoaded = true;
-        }
+    <div id="cameraArea">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+    </div>
 
-        statusText.textContent = "カメラを起動しています…";
+    <p id="result">写真を登録してからカメラを起動してください。</p>
+  </section>
 
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: "user",
-            width: { ideal: 640 },
-            height: { ideal: 480 }
-          }
-        });
+  <p class="note">
+    テスト専用です。選択した写真と顔の特徴データは、
+    このページを開いている間だけメモリ上に保持します。
+    写真や特徴データを保存・送信する処理はありません。
+    ページの再読み込みで登録データは消えます。
+    本番の出席簿とは連携していません。
+  </p>
 
-        video.srcObject = stream;
-        await video.play();
+<script>
+  const MODEL_URL =
+    "https://cdn.jsdelivr.net/gh/justadudewhoihacks/face-api.js@master/weights";
 
-        await new Promise(resolve => {
-          if (video.readyState >= 2) {
-            resolve();
-          } else {
-            video.onloadeddata = resolve;
-          }
-        });
+  // 正しいモデル配布先
+  const MODEL_URLS = [
+    "https://cdn.jsdelivr.net/gh/justadudewhoihacks/face-api.js@master/weights"
+  ];
 
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("overlay");
+  const statusText = document.getElementById("status");
+  const resultText = document.getElementById("result");
+  const photoInput = document.getElementById("photoInput");
+  const photoStatus = document.getElementById("photoStatus");
+  const registeredList = document.getElementById("registeredList");
+  const registerButton = document.getElementById("registerButton");
+  const startButton = document.getElementById("startButton");
+  const stopButton = document.getElementById("stopButton");
 
-        running = true;
-        lastFaceCount = -1;
+  let modelsLoaded = false;
+  let stream = null;
+  let running = false;
+  let busy = false;
+  let loopTimer = null;
 
-        startButton.disabled = true;
-        stopButton.disabled = false;
+  // ページ内のメモリだけに保持。永続保存しない。
+  const registeredFaces = new Map();
 
-        statusText.textContent = "カメラ起動中";
-        resultText.textContent = "カメラに顔を向けてください。";
+  async function loadModels() {
+    if (modelsLoaded) return;
 
-        detectFaces();
+    statusText.textContent = "顔認識モデルを読み込んでいます…";
 
-      } catch (error) {
-        stopCamera();
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URLS[0]),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URLS[0]),
+      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URLS[0])
+    ]);
 
-        statusText.textContent = "起動できませんでした";
-        resultText.textContent =
-          "エラー：" + error.message +
-          "\nインターネット接続、カメラの許可、モデルの読み込みを確認してください。";
+    modelsLoaded = true;
+    registerButton.disabled = false;
+    startButton.disabled = false;
+    statusText.textContent = "準備完了";
+    photoStatus.textContent = "写真を選択してください。";
+  }
 
-        startButton.disabled = false;
-      }
+  function getEmployeeName(filename) {
+    // 拡張子を除去して名前として扱う
+    return filename.replace(/\.[^.]+$/, "").trim();
+  }
+
+  async function readImage(file) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+
+    try {
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(
+          new Error("画像を開けませんでした")
+        );
+        img.src = url;
+      });
+
+      return img;
+    } finally {
+      // 読み込み後、不要になった一時URLを解放
+      // 画像そのものは登録処理後に参照を手放す
+    }
+  }
+
+  async function registerPhotos() {
+    if (!modelsLoaded) {
+      photoStatus.textContent = "モデルを読み込んでください。";
+      return;
     }
 
-    async function detectFaces() {
-      if (!running || busy) return;
+    const files = Array.from(photoInput.files || []);
 
-      busy = true;
+    if (files.length === 0) {
+      photoStatus.textContent = "先に写真を選択してください。";
+      return;
+    }
 
-      try {
-        const detections = await faceapi.detectAllFaces(
+    registerButton.disabled = true;
+    startButton.disabled = true;
+
+    let success = 0;
+    const errors = [];
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const name = getEmployeeName(file.name);
+
+        photoStatus.textContent =
+          "登録中：" + (i + 1) + " / " + files.length +
+          "\n" + name;
+
+        if (!name) {
+          errors.push(file.name + "：名前を取得できません");
+          continue;
+        }
+
+        let img;
+        let objectUrl;
+
+        try {
+          objectUrl = URL.createObjectURL(file);
+          img = new Image();
+
+          await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = () => reject(
+              new Error("画像を開けません")
+            );
+            img.src = objectUrl;
+          });
+
+          const detections = await faceapi
+            .detectAllFaces(
+              img,
+              new faceapi.TinyFaceDetectorOptions({
+                inputSize: 416,
+                scoreThreshold: 0.5
+              })
+            )
+            .withFaceLandmarks()
+            .withFaceDescriptors();
+
+          if (detections.length !== 1) {
+            errors.push(
+              name + "：" +
+              (detections.length === 0
+                ? "顔を検出できません"
+                : "顔が複数あります")
+            );
+            continue;
+          }
+
+          // 写真から数値の特徴データだけを登録
+          registeredFaces.set(
+            name,
+            Array.from(detections[0].descriptor)
+          );
+
+          success++;
+
+        } catch (error) {
+          errors.push(name + "：" + error.message);
+        } finally {
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          img = null;
+        }
+      }
+
+      updateRegisteredList();
+
+      photoStatus.textContent =
+        "処理完了\n成功：" + success + "人\n" +
+        "エラー：" + errors.length + "件" +
+        (errors.length
+          ? "\n\n確認が必要な写真：\n" + errors.join("\n")
+          : "");
+
+      resultText.textContent =
+        "登録人数：" + registeredFaces.size + "人\n" +
+        "カメラを起動して照合できます。";
+
+    } finally {
+      registerButton.disabled = false;
+      startButton.disabled = false;
+    }
+  }
+
+  function updateRegisteredList() {
+    const names = Array.from(registeredFaces.keys()).sort();
+
+    registeredList.textContent =
+      "登録人数：" + names.length + "人\n" +
+      (names.length ? names.join("\n") : "まだ登録されていません。");
+  }
+
+  function clearRegisteredFaces() {
+    registeredFaces.clear();
+    updateRegisteredList();
+
+    resultText.textContent = "登録データをすべて消去しました。";
+    photoStatus.textContent = "登録データを消去しました。";
+  }
+
+  async function startCamera() {
+    if (running) return;
+
+    try {
+      await loadModels();
+
+      if (registeredFaces.size === 0) {
+        resultText.textContent =
+          "先に社員の顔写真を登録してください。";
+        return;
+      }
+
+      statusText.textContent = "カメラを起動しています…";
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: "user",
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        }
+      });
+
+      video.srcObject = stream;
+      await video.play();
+
+      if (video.readyState < 2) {
+        await new Promise(resolve => {
+          video.onloadeddata = resolve;
+        });
+      }
+
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      running = true;
+      stopButton.disabled = false;
+      startButton.disabled = true;
+
+      statusText.textContent = "カメラ起動中";
+      resultText.textContent = "カメラに1人だけ映ってください。";
+
+      detectFaces();
+
+    } catch (error) {
+      stopCamera();
+
+      statusText.textContent = "カメラを起動できませんでした";
+      resultText.textContent = error.message;
+      startButton.disabled = false;
+    }
+  }
+
+  async function detectFaces() {
+    if (!running || busy) return;
+
+    busy = true;
+
+    try {
+      const detections = await faceapi
+        .detectAllFaces(
           video,
           new faceapi.TinyFaceDetectorOptions({
             inputSize: 320,
             scoreThreshold: 0.5
           })
-        );
+        )
+        .withFaceLandmarks()
+        .withFaceDescriptors();
 
-        if (!running) return;
-
-        const displaySize = {
-          width: video.videoWidth,
-          height: video.videoHeight
-        };
-
-        const resized = faceapi.resizeResults(
-          detections,
-          displaySize
-        );
-
-        const context = canvas.getContext("2d");
-        context.clearRect(0, 0, canvas.width, canvas.height);
-
-        faceapi.draw.drawDetections(canvas, resized);
-
-        const count = detections.length;
-
-        if (count !== lastFaceCount) {
-          lastFaceCount = count;
-
-          if (count === 0) {
-            resultText.textContent = "顔が見つかりません。カメラを見てください。";
-          } else if (count === 1) {
-            resultText.textContent = "顔を検出しました！";
-          } else {
-            resultText.textContent =
-              count + "人の顔を検出しました。1人ずつ映ってください。";
-          }
-        }
-
-        statusText.textContent = "顔を検出しています…";
-
-      } catch (error) {
-        statusText.textContent = "顔の検出中にエラーが発生しました";
-      } finally {
-        busy = false;
-
-        if (running) {
-          setTimeout(detectFaces, 100);
-        }
-      }
-    }
-
-    function stopCamera() {
-      running = false;
-
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-        stream = null;
-      }
-
-      video.srcObject = null;
+      if (!running) return;
 
       const context = canvas.getContext("2d");
       context.clearRect(0, 0, canvas.width, canvas.height);
 
-      startButton.disabled = false;
-      stopButton.disabled = true;
+      const resized = faceapi.resizeResults(detections, {
+        width: video.videoWidth,
+        height: video.videoHeight
+      });
 
-      statusText.textContent = "カメラを停止しました";
-      resultText.textContent = "もう一度試す場合はカメラを起動してください。";
+      faceapi.draw.drawDetections(canvas, resized);
+
+      if (detections.length === 0) {
+        resultText.textContent = "顔が見つかりません。";
+      } else if (detections.length > 1) {
+        resultText.textContent = "1人ずつカメラに映ってください。";
+      } else {
+        const current = detections[0].descriptor;
+
+        let bestName = "";
+        let bestDistance = Infinity;
+
+        for (const [name, saved] of registeredFaces) {
+          const distance = faceapi.euclideanDistance(
+            current,
+            new Float32Array(saved)
+          );
+
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestName = name;
+          }
+        }
+
+        // 試験用の暫定値。本人確認の精度を保証しない。
+        if (bestName && bestDistance < 0.6) {
+          resultText.textContent =
+            "一致候補：" + bestName +
+            "\n照合距離：" + bestDistance.toFixed(3);
+        } else {
+          resultText.textContent =
+            "一致する登録写真が見つかりません。\n" +
+            "照合距離：" + bestDistance.toFixed(3);
+        }
+      }
+
+      statusText.textContent = "カメラ起動中";
+
+    } catch (error) {
+      statusText.textContent = "顔の照合でエラーが発生しました";
+      resultText.textContent = error.message;
+
+    } finally {
+      busy = false;
+
+      if (running) {
+        loopTimer = setTimeout(detectFaces, 500);
+      }
     }
-  </script>
+  }
+
+  function stopCamera() {
+    running = false;
+    busy = false;
+
+    if (loopTimer !== null) {
+      clearTimeout(loopTimer);
+      loopTimer = null;
+    }
+
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      stream = null;
+    }
+
+    video.srcObject = null;
+
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+
+    startButton.disabled = false;
+    stopButton.disabled = true;
+
+    statusText.textContent = "カメラを停止しました";
+  }
+
+  loadModels().catch(error => {
+    statusText.textContent = "モデルの読み込みに失敗しました";
+    resultText.textContent =
+      error.message +
+      "\nインターネット接続とモデル配布先を確認してください。";
+  });
+</script>
 </body>
 </html>
